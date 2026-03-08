@@ -167,11 +167,39 @@ class AsyncBatchModelPredictor(
       raise InternalBugError(msg)
     if len(requests) == 1:
       return iter([_get_inst_data_map_func(get_inst_data, requests[0])])
-    return self._thread_pool.map(
-        functools.partial(_get_inst_data_map_func, get_inst_data),
-        requests,
-        timeout=self._thread_pool_timeout,
+    return self._iter_with_timeout(
+        self._thread_pool.map(
+            functools.partial(_get_inst_data_map_func, get_inst_data),
+            requests,
+            timeout=self._thread_pool_timeout,
+        )
     )
+
+  def _iter_with_timeout(
+      self,
+      iterator: Iterator[
+          Union[
+              data_accessor_errors.DataAccessorError,
+              _GetInstanceDataAsyncReturnType,
+          ]
+      ],
+  ) -> Iterator[
+      Union[
+          data_accessor_errors.DataAccessorError,
+          _GetInstanceDataAsyncReturnType,
+      ]
+  ]:
+    """Wraps thread pool iterator to catch TimeoutError."""
+    try:
+      yield from iterator
+    except concurrent.futures.TimeoutError:
+      cloud_logging_client.error(
+          'Thread pool timed out after %s seconds.',
+          self._thread_pool_timeout,
+      )
+      yield data_accessor_errors.DataAccessorError(
+          'Thread pool timeout exceeded.'
+      )
 
   def _get_and_load_instance_data(
       self,

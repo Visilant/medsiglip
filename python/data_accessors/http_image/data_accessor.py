@@ -38,7 +38,7 @@ def _download_http_image(
   url_filename = os.path.basename(parsed_url.path)
   local_filename = os.path.join(temp_dir, url_filename)
   with open(local_filename, 'wb') as output_file:
-    with requests.get(instance.url, stream=True) as r:
+    with requests.get(instance.url, stream=True, timeout=(10, 300)) as r:
       r.raise_for_status()
       for chunk in r.iter_content(chunk_size=102400):
         output_file.write(chunk)
