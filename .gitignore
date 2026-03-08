@@ -1,0 +1,16 @@
+.env
+*.env
+.netrc
+wandb/
+experiments/.venv/
+experiments/outputs/
+experiments/checkpoints/
+__pycache__/
+*.pyc
+*.pt
+*.bin
+*.safetensors
+*.ckpt
+.idea/
+.vscode/
+*.swp

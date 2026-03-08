@@ -1,0 +1,60 @@
+# Base configuration for MedSigLIP fine-tuning experiments
+model:
+  model_id: "google/medsiglip-448"
+  image_size: 448
+  embedding_dim: 1152
+  max_text_tokens: 64
+
+data:
+  csv_path: "/home/adi/Visilant_MVP.csv"
+  image_dir: "/home/adi/visilant_data"
+  test_csv_path: "/home/adi/visilant_data/test_dataset_combined.csv"
+  clean_csv_path: "/home/adi/FineTune_Medgemma/clean_visilant_data_aug11_2025.csv"
+  splits_path: "experiments/data/splits.json"
+  val_fraction: 0.1
+  image_extension: ".jpg"
+
+labels:
+  lens_status_classes:
+    - "clear_crystalline_lens"
+    - "immature_cataract"
+    - "early_lens_changes"
+    - "PCIOL"
+    - "not_able_to_visualize_lens"
+    - "mature_cataract"
+    - "aphakia"
+  lens_status_drop: ["Other"]
+
+  corneal_abnormality_map:
+    "Normal": "Normal"
+    "Active corneal infection": "Active corneal infection"
+    "Inactive corneal opacity / scarring": "Inactive corneal opacity"
+    "Other": "Rare"
+    "Keratoplasty / graft": "Rare"
+    "Prosthetic / Phthisis": "Rare"
+    "Conjunctivitis": "Rare"
+    "PCIOL / Pseudophakia": "Rare"
+    "Trauma / foreign body": "Rare"
+    "Corneal degeneration / dystrophy": "Rare"
+    "Pterygium": "Rare"
+    "Subconjunctival hemorrhage": "Rare"
+  corneal_classes:
+    - "Normal"
+    - "Active corneal infection"
+    - "Inactive corneal opacity"
+    - "Rare"
+
+training:
+  seed: 42
+  fp16: true
+  weight_decay: 0.01
+  lr_scheduler_type: "cosine"
+  dataloader_num_workers: 4
+
+wandb:
+  project: "medsiglip-visilant"
+  entity: null  # set via WANDB_ENTITY env var or here
+
+paths:
+  output_base: "experiments/outputs"
+  checkpoint_base: "experiments/checkpoints"
