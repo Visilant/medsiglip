@@ -19,7 +19,7 @@ class TritonServerHealthCheck(server_gunicorn.ModelServerHealthCheck):
   @override
   def check_health(self) -> bool:
     try:
-      r = requests.get(self._health_check_url)
+      r = requests.get(self._health_check_url, timeout=(5, 5))
       return r.status_code == http.HTTPStatus.OK.value
-    except requests.exceptions.ConnectionError:
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
       return False

@@ -46,6 +46,10 @@ def main(argv: Sequence[str]) -> None:
   options = {
       'bind': f'0.0.0.0:{http_port}',
       'workers': 3,
+      # NOTE: Gunicorn timeout (120s) is shorter than the thread pool timeout
+      # (1800s in flags.py). If a request exceeds 120s, Gunicorn kills the
+      # worker even though threads may still be running. This is an upstream
+      # design decision — the thread pool timeout acts as a secondary safeguard.
       'timeout': 120,
   }
   model_rest_port = int(os.environ.get('MODEL_REST_PORT'))

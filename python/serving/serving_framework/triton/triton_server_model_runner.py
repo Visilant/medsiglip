@@ -91,7 +91,11 @@ class TritonServerModelRunner(model_runner.ModelRunner):
     result = self._client.infer(
         model_name, inputs, model_version, parameters=model_parameters
     )
-    assert result is not None  # infer never returns None, despite annotation.
+    if result is None:
+      raise RuntimeError(
+          f'Triton inference returned None for model {model_name} version'
+          f' {model_version}.'
+      )
 
     outputs = {key: result.as_numpy(key) for key in model_output_keys}
     missing_keys = {key for key in model_output_keys if outputs[key] is None}
