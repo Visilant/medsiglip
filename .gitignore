@@ -14,3 +14,4 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+experiments/data/validation_log.json

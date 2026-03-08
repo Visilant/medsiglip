@@ -117,6 +117,29 @@ def create_stratified_split(
     return splits
 
 
+def save_runtime_bad_images(bad_images_path: str = "experiments/data/bad_images.json") -> int:
+    """Merge runtime-discovered bad images into bad_images.json.
+
+    Returns the number of newly added images.
+    """
+    from data.dataset import get_runtime_bad_tracker
+
+    runtime_bad = get_runtime_bad_tracker().get_all()
+    if not runtime_bad:
+        return 0
+
+    existing = _load_bad_images(bad_images_path)
+    new_bad = runtime_bad - existing
+    if not new_bad:
+        return 0
+
+    merged = sorted(existing | runtime_bad)
+    Path(bad_images_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(bad_images_path, "w") as f:
+        json.dump(merged, f, indent=2)
+    return len(new_bad)
+
+
 def load_splits(path: str) -> dict:
     """Load previously saved splits."""
     with open(path) as f:
