@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import sys
 
@@ -30,15 +31,17 @@ if _gpu_arg is not None:
 import numpy as np
 import torch
 import yaml
-from torch.utils.data import WeightedRandomSampler
 from transformers import AutoProcessor, Trainer, TrainingArguments
 
 from data.caption_builder import CaptionProcessor
 from data.collator import contrastive_collate_fn
 from data.dataset import VisilantContrastiveDataset
-from data.splits import create_stratified_split, load_and_filter_data, load_splits
+from data.splits import create_stratified_split, load_and_filter_data, load_splits, save_runtime_bad_images
 from models.contrastive import load_contrastive_model
+from training.callbacks import NaNLossCallback
 from training.evaluate import retrieval_evaluate, zero_shot_evaluate
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args():
@@ -63,6 +66,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+    )
 
     # GPU already set via early sys.argv parsing above
 
@@ -149,6 +156,8 @@ def main():
         eval_strategy="steps",
         eval_steps=args.eval_steps,
         save_strategy="epoch",
+        save_total_limit=2,
+        gradient_checkpointing=True,
         dataloader_num_workers=config["training"]["dataloader_num_workers"],
         report_to="wandb",
         run_name=f"contrastive-{args.experiment_id}",
@@ -163,11 +172,17 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=contrastive_collate_fn,
+        callbacks=[NaNLossCallback()],
     )
 
     # Train
     print("Starting training...")
     trainer.train()
+
+    # Persist runtime-discovered bad images
+    n_bad = save_runtime_bad_images()
+    if n_bad:
+        logger.info("Persisted %d runtime-discovered bad images to bad_images.json", n_bad)
 
     # Save final model
     trainer.save_model(os.path.join(output_dir, "final"))

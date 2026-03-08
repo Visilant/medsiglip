@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import sys
 
@@ -24,7 +25,6 @@ for i, arg in enumerate(sys.argv):
 if _gpu_arg is not None:
     os.environ["CUDA_VISIBLE_DEVICES"] = _gpu_arg
 
-import numpy as np
 import torch
 import yaml
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -32,9 +32,12 @@ from transformers import Trainer, TrainingArguments
 
 from data.collator import classification_collate_fn
 from data.dataset import VisilantClassificationDataset
-from data.splits import load_and_filter_data, load_splits
+from data.splits import load_and_filter_data, load_splits, save_runtime_bad_images
 from models.classifier import VisionClassifier
+from training.callbacks import NaNLossCallback
 from utils.metrics import compute_classification_metrics, compute_clinical_metrics
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args():
@@ -79,11 +82,31 @@ class FocalLoss(torch.nn.Module):
 class ClassificationTrainer(Trainer):
     """Custom Trainer with class-weighted or focal loss."""
 
-    def __init__(self, class_weights=None, use_focal=False, focal_gamma=2.0, **kwargs):
+    def __init__(self, class_weights=None, use_focal=False, focal_gamma=2.0,
+                 use_weighted_sampler=False, **kwargs):
         super().__init__(**kwargs)
         self.class_weights = class_weights
         self.use_focal = use_focal
-        self.focal_gamma = focal_gamma
+        self.use_weighted_sampler = use_weighted_sampler
+
+        if use_focal:
+            self.focal_loss_fn = FocalLoss(gamma=focal_gamma, weight=class_weights)
+
+    def get_train_dataloader(self):
+        if not self.use_weighted_sampler:
+            return super().get_train_dataloader()
+
+        sample_weights = self.train_dataset.get_sample_weights()
+        sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.args.per_device_train_batch_size,
+            sampler=sampler,
+            collate_fn=self.data_collator,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.pop("labels")
@@ -91,8 +114,9 @@ class ClassificationTrainer(Trainer):
         logits = outputs["logits"]
 
         if self.use_focal:
-            weight = self.class_weights.to(logits.device) if self.class_weights is not None else None
-            loss_fn = FocalLoss(gamma=self.focal_gamma, weight=weight)
+            loss_fn = self.focal_loss_fn
+            if loss_fn.weight is not None and loss_fn.weight.device != logits.device:
+                loss_fn.weight = loss_fn.weight.to(logits.device)
             loss = loss_fn(logits, labels)
         elif self.class_weights is not None:
             loss = torch.nn.functional.cross_entropy(
@@ -100,6 +124,16 @@ class ClassificationTrainer(Trainer):
             )
         else:
             loss = torch.nn.functional.cross_entropy(logits, labels)
+
+        # NaN guard: log diagnostics and zero out to skip this batch's gradient
+        if torch.isnan(loss) or torch.isinf(loss):
+            logger.warning(
+                "NaN/Inf loss detected — labels: %s, logit range: [%.4f, %.4f]",
+                labels.cpu().tolist(),
+                logits.min().item(),
+                logits.max().item(),
+            )
+            loss = torch.tensor(0.0, device=loss.device, requires_grad=True)
 
         return (loss, outputs) if return_outputs else loss
 
@@ -119,6 +153,10 @@ def make_compute_metrics(class_names):
 
 def main():
     args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+    )
 
     # GPU already set via early sys.argv parsing above
 
@@ -199,9 +237,11 @@ def main():
         eval_strategy="steps",
         eval_steps=args.eval_steps,
         save_strategy="epoch",
+        save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model="macro_auroc",
         greater_is_better=True,
+        gradient_checkpointing=True,
         dataloader_num_workers=config["training"]["dataloader_num_workers"],
         report_to="wandb",
         run_name=f"classify-{args.experiment_id}-{args.task}",
@@ -220,10 +260,17 @@ def main():
         class_weights=class_weights if not args.use_focal_loss else class_weights,
         use_focal=args.use_focal_loss,
         focal_gamma=args.focal_gamma,
+        use_weighted_sampler=args.use_weighted_sampler,
+        callbacks=[NaNLossCallback()],
     )
 
     print("Starting training...")
     trainer.train()
+
+    # Persist runtime-discovered bad images
+    n_bad = save_runtime_bad_images()
+    if n_bad:
+        logger.info("Persisted %d runtime-discovered bad images to bad_images.json", n_bad)
 
     # Save final model
     trainer.save_model(os.path.join(output_dir, "final"))

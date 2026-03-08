@@ -1,6 +1,8 @@
 """PyTorch datasets for contrastive and classification fine-tuning."""
 
+import logging
 import os
+import threading
 
 import numpy as np
 import pandas as pd
@@ -20,6 +22,47 @@ from torchvision.transforms import (
 )
 
 from data.caption_builder import CaptionProcessor
+
+logger = logging.getLogger(__name__)
+
+
+class BadImageTracker:
+    """Thread-safe tracker for images that fail to load at runtime."""
+
+    def __init__(self):
+        self._bad: set[str] = set()
+        self._lock = threading.Lock()
+
+    def add(self, image_file: str) -> None:
+        with self._lock:
+            self._bad.add(image_file)
+
+    def get_all(self) -> set[str]:
+        with self._lock:
+            return set(self._bad)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._bad)
+
+
+# Global tracker shared across datasets within a process
+_runtime_bad_tracker = BadImageTracker()
+
+
+def get_runtime_bad_tracker() -> BadImageTracker:
+    return _runtime_bad_tracker
+
+
+def _safe_load_image(path: str) -> Image.Image | None:
+    """Load and fully decode an image, returning None on failure."""
+    try:
+        img = Image.open(path)
+        img.load()  # Force full decode — catches truncated/corrupt files
+        return img.convert("RGB")
+    except Exception as e:
+        logger.warning("Failed to load image %s: %s", path, e)
+        return None
 
 
 def get_image_transform(size: int = 448):
@@ -52,23 +95,34 @@ class VisilantContrastiveDataset(Dataset):
     def __len__(self) -> int:
         return len(self.df)
 
-    def __getitem__(self, idx: int) -> dict:
-        row = self.df.iloc[idx]
+    def __getitem__(self, idx: int) -> dict | None:
+        # Try the requested index, then up to 10 neighbors as fallback
+        for offset in range(11):
+            try_idx = (idx + offset) % len(self.df)
+            row = self.df.iloc[try_idx]
+            img_path = os.path.join(self.image_dir, row["image_file"])
 
-        # Load and transform image
-        img_path = os.path.join(self.image_dir, row["image_file"])
-        image = Image.open(img_path).convert("RGB")
-        pixel_values = self.transform(image)
+            image = _safe_load_image(img_path)
+            if image is None:
+                _runtime_bad_tracker.add(row["image_file"])
+                continue
 
-        # Build and tokenize caption
-        caption = self.caption_processor.build_and_truncate(row.to_dict())
-        tokens = self.caption_processor.tokenize(caption)
+            pixel_values = self.transform(image)
 
-        return {
-            "pixel_values": pixel_values,
-            "input_ids": tokens["input_ids"],
-            "attention_mask": tokens["attention_mask"],
-        }
+            # Build and tokenize caption with empty guard
+            caption = self.caption_processor.build_and_truncate(row.to_dict())
+            if not caption or not caption.strip():
+                caption = "Slit lamp photo."
+            tokens = self.caption_processor.tokenize(caption)
+
+            return {
+                "pixel_values": pixel_values,
+                "input_ids": tokens["input_ids"],
+                "attention_mask": tokens["attention_mask"],
+            }
+
+        logger.error("All 11 fallback indices failed starting at idx=%d", idx)
+        return None
 
 
 class VisilantClassificationDataset(Dataset):
@@ -103,19 +157,28 @@ class VisilantClassificationDataset(Dataset):
     def __len__(self) -> int:
         return len(self.df)
 
-    def __getitem__(self, idx: int) -> dict:
-        row = self.df.iloc[idx]
+    def __getitem__(self, idx: int) -> dict | None:
+        # Try the requested index, then up to 10 neighbors as fallback
+        for offset in range(11):
+            try_idx = (idx + offset) % len(self.df)
+            row = self.df.iloc[try_idx]
+            img_path = os.path.join(self.image_dir, row["image_file"])
 
-        img_path = os.path.join(self.image_dir, row["image_file"])
-        image = Image.open(img_path).convert("RGB")
-        pixel_values = self.transform(image)
+            image = _safe_load_image(img_path)
+            if image is None:
+                _runtime_bad_tracker.add(row["image_file"])
+                continue
 
-        label = self.class_to_idx[row[self.label_column]]
+            pixel_values = self.transform(image)
+            label = self.class_to_idx[row[self.label_column]]
 
-        return {
-            "pixel_values": pixel_values,
-            "labels": label,
-        }
+            return {
+                "pixel_values": pixel_values,
+                "labels": label,
+            }
+
+        logger.error("All 11 fallback indices failed starting at idx=%d", idx)
+        return None
 
     def get_class_weights(self, clamp_range: tuple[float, float] = (0.5, 10.0)) -> torch.Tensor:
         """Compute inverse-frequency class weights, clamped to range."""
@@ -132,9 +195,9 @@ class VisilantClassificationDataset(Dataset):
     def get_sample_weights(self, cap: float = 10.0) -> torch.Tensor:
         """Per-sample weights for WeightedRandomSampler."""
         class_weights = self.get_class_weights(clamp_range=(1.0, cap))
+        weight_map = {name: class_weights[idx].item() for name, idx in self.class_to_idx.items()}
         sample_weights = torch.tensor(
-            [class_weights[self.class_to_idx[row[self.label_column]]].item()
-             for _, row in self.df.iterrows()],
+            self.df[self.label_column].map(weight_map).values,
             dtype=torch.float64,
         )
         return sample_weights

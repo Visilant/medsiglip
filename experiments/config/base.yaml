@@ -49,7 +49,7 @@ training:
   fp16: true
   weight_decay: 0.01
   lr_scheduler_type: "cosine"
-  dataloader_num_workers: 4
+  dataloader_num_workers: 2
 
 wandb:
   project: "medsiglip-visilant"
